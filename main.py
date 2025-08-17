@@ -181,41 +181,53 @@ class RedisTailer(QThread):
 # Dynamic graph panel using pyqtgraph
 # -----------------------------
 class GraphPanel(QWidget):
-    def __init__(self, columns: int):
-        super().__init__()
+    def __init__(self, columns: int = 2, max_points: int = 2000, parent: Optional[QWidget] = None):
+        super().__init__(parent)
         self.columns = columns
-        self.layout = QGridLayout(self)
-        self.setLayout(self.layout)
+        self.max_points = max_points
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(8)
+        self.grid.setVerticalSpacing(8)
+        self._order = []
+        self._curves = {}
+        self._data = {}
+        self._last_t = {}  # track last timestamp per series to avoid duplicates
 
-        # Hardcoded: display a sine wave on startup
-        x = np.linspace(0, 2 * np.pi, 500)
-        y = np.sin(x)
 
-        plot_widget = pg.PlotWidget(title="Sine Wave")
-        # Stop auto-range jitter and padding feedback
-        plot_widget.enableAutoRange(x=False, y=False)
-        plot_widget.getViewBox().setDefaultPadding(0.0)
-        plot_widget.showGrid(x=True, y=True)
+    def ensure_plot(self, name: str):
+        if name in self._curves:
+            return self._curves[name]
+        row = len(self._order) // self.columns
+        col = len(self._order) % self.columns
+        plot = pg.PlotWidget()
+        plot.setTitle(name)
+        plot.showGrid(x=True, y=True)
+        curve = plot.plot()
+        self.grid.addWidget(plot, row, col)
+        self._order.append(name)
+        self._curves[name] = curve
+        self._data[name] = ([], [])
+        return curve
 
-        curve = plot_widget.plot(
-            x, y,
-            pen=pg.mkPen((0, 150, 255), width=2),
-            symbol='o',            # ensure visibility even if the line path glitches
-            symbolSize=4,
-            symbolBrush=(255, 120, 120),
-            symbolPen=None,
-            connect='finite',
-        )
-        # Explicit ranges so nothing auto-resizes
-        plot_widget.setXRange(0.0, 2*np.pi, padding=0)
-        plot_widget.setYRange(-1.2, 1.2, padding=0)
+    def add_point(self, name: str, t: float, y: float) -> None:
+        if not name:
+            return
+        # Skip if time not increasing for this series
+        last = self._last_t.get(name)
+        if last is not None and t <= last:
+            return
+        self._last_t[name] = t
 
-        # Give it a stable size to avoid layout oscillation in ScrollArea/Splitter
-        from PySide6.QtWidgets import QSizePolicy
-        plot_widget.setMinimumHeight(260)
-        plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        self.layout.addWidget(plot_widget, 0, 0)
+        curve = self.ensure_plot(name)
+        xs, ys = self._data[name]
+        xs.append(t)
+        ys.append(y)
+        if len(xs) > self.max_points:
+            drop = len(xs) - self.max_points
+            del xs[:drop]
+            del ys[:drop]
+        curve.setData(xs, ys)
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -239,7 +251,7 @@ class MainWindow(QMainWindow):
         self.api_path_edit = QLineEdit(self.config.commands_path)
         self.api_user_edit = QLineEdit(self.config.api_username)
         self.api_pass_edit = QLineEdit(self.config.api_password)
-        self.api_pass_edit.setEchoMode(QLineEdit.Password)
+        self.api_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
         api_layout.addWidget(QLabel("Base"), 0, 0)
         api_layout.addWidget(self.api_base_edit, 0, 1)
         api_layout.addWidget(QLabel("Path"), 1, 0)
@@ -257,7 +269,7 @@ class MainWindow(QMainWindow):
         self.redis_chan_edit = QLineEdit(self.config.redis_channel)
         self.redis_user_edit = QLineEdit(self.config.redis_username)
         self.redis_pass_edit = QLineEdit(self.config.redis_password)
-        self.redis_pass_edit.setEchoMode(QLineEdit.Password)
+        self.redis_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.btn_redis_start = QPushButton("Start Log Tail")
         self.btn_redis_stop = QPushButton("Stop Log Tail")
         self.btn_redis_stop.setEnabled(False)
@@ -310,7 +322,7 @@ class MainWindow(QMainWindow):
         graphs_scroll.setMinimumHeight(300)
 
         # Right stack: commands on top, splitter between graphs and log
-        right_splitter = QSplitter(Qt.Vertical)
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
         right_splitter.addWidget(graphs_scroll)
         right_splitter.addWidget(self.log)
         right_splitter.setSizes([500, 200])
@@ -329,7 +341,7 @@ class MainWindow(QMainWindow):
         side.setMinimumWidth(360)
 
         # Main splitter: side <-> right
-        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.addWidget(side)
         main_splitter.addWidget(right_container)
         main_splitter.setSizes([360, 800])
@@ -467,7 +479,7 @@ class MainWindow(QMainWindow):
 
         # Keep device streams separate so they don't merge
         series = f"{device}:{name}"
-        self.graphs.add_point(series, t, val, self.log, self.statusBar)
+        self.graphs.add_point(series, t, val)
 
     def append_log(self, line: str) -> None:
         self.log.append(line)
