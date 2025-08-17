@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 import httpx
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QThread, QThreadPool, QRunnable, Signal, Slot, Qt
+from PySide6.QtCore import QObject, QThread, QThreadPool, QRunnable, Signal, Slot, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -144,6 +144,7 @@ class RedisTailer(QThread):
             self._pubsub.subscribe(self.channel)
             self.status.emit(f"Subscribed to redis://{self.host}:{self.port} channel '{self.channel}'")
 
+            count = 0
             while not self._stop_flag.is_set():
                 item = self._pubsub.get_message(timeout=1.0)  # seconds
                 if not item:
@@ -162,6 +163,11 @@ class RedisTailer(QThread):
                         line = line.strip()
                         if line:
                             self.message.emit(line)
+
+                count += 1
+                if count % 10 == 0:
+                    QApplication.processEvents()  # keep GUI responsive
+
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -244,6 +250,13 @@ class MainWindow(QMainWindow):
             pass
         self._http_workers: set[HttpRequestWorker] = set()  # keep refs to prevent GC/segfaults
         self.redis_thread: Optional[RedisTailer] = None
+
+        self._pending_points = []
+        self._plot_timer = QTimer(self)
+        self._plot_timer.setInterval(30)  # ms, adjust as needed
+        self._plot_timer.timeout.connect(self.flush_pending_points)
+        self._plot_timer.start()
+
 
         api_box = QGroupBox("API Endpoint")
         api_layout = QGridLayout()
@@ -370,6 +383,11 @@ class MainWindow(QMainWindow):
             path = "/" + path
         return base + path
 
+    def flush_pending_points(self):
+        for series, t, val in self._pending_points:
+            self.graphs.add_point(series, t, val)
+        self._pending_points.clear()
+
     @Slot()
     def on_ping(self) -> None:
         base, auth = self._base_and_auth()
@@ -479,7 +497,7 @@ class MainWindow(QMainWindow):
 
         # Keep device streams separate so they don't merge
         series = f"{device}:{name}"
-        self.graphs.add_point(series, t, val)
+        self._pending_points.append((series, t, val))
 
     def append_log(self, line: str) -> None:
         self.log.append(line)
